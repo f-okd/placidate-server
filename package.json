@@ -15,9 +15,9 @@
   },
   "type": "module",
   "scripts": {
-    "start": "ts-node app.ts",
+    "start": "npx tsx ./src/index.ts",
     "build": "tsc",
-    "dev": "ts-node app.ts"
+    "dev": "npx tsx ./src/index.ts"
   },
   "compilerOptions": {
     "esModuleInterop": true
