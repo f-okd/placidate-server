@@ -3,7 +3,7 @@ import 'dotenv/config';
 import express from 'express';
 import { createClient } from '@supabase/supabase-js';
 import cors from 'cors';
-import { error } from 'console';
+import morgan from 'morgan';
 
 const supabaseUrl = String(process.env.SUPABASE_URL);
 const serviceKey = String(process.env.SERVICE_KEY);
@@ -13,12 +13,8 @@ export const supabase = createClient(supabaseUrl, serviceKey);
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(morgan('tiny'));
 const port = 8000;
-
-app.use((req, _res, next) => {
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
-  next();
-});
 
 app.get('/api/health', (req, res) => {
   console.log('Health check endpoint hit');
