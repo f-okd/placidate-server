@@ -209,6 +209,19 @@ export const deleteAccount = async (userId: string): Promise<boolean> => {
       return false;
     }
 
+    const { error: avatarDeleteError } = await supabase.storage
+      .from('avatars')
+      .remove([`avatar-${userId}`]);
+
+    if (avatarDeleteError) {
+      console.error('Error deleting user avatar:', {
+        operation: 'delete_user_avatar',
+        error: avatarDeleteError,
+        userId,
+      });
+      return false;
+    }
+
     return true;
   } catch (error) {
     console.error('Unexpected error in deleteAccount:', {
