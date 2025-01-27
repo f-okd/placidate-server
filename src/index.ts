@@ -41,7 +41,7 @@ app.post('/api/users/:userId/delete', async (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`Example app listening on port ${port}`);
+  console.log(`Placidate listening on port ${port}`);
 });
 
 export const deleteAccount = async (userId: string): Promise<boolean> => {
@@ -209,17 +209,26 @@ export const deleteAccount = async (userId: string): Promise<boolean> => {
       return false;
     }
 
-    const { error: avatarDeleteError } = await supabase.storage
+    const { data: avatars, error: avatarListError } = await supabase.storage
       .from('avatars')
-      .remove([`avatar-${userId}`]);
-
-    if (avatarDeleteError) {
-      console.error('Error deleting user avatar:', {
-        operation: 'delete_user_avatar',
-        error: avatarDeleteError,
-        userId,
+      .list('', {
+        search: `avatar-${userId}-`,
       });
+
+    if (avatarListError) {
+      console.error(`Error listing avatars for user ${userId}`);
       return false;
+    }
+    // Should only ever return one value
+    if (avatars && avatars.length > 0) {
+      const { error: avatarDeleteError } = await supabase.storage
+        .from('avatars')
+        .remove([avatars[0].name]);
+
+      if (avatarDeleteError) {
+        console.error(`Error deleting user ${userId}'s avatar:`);
+        return false;
+      }
     }
 
     return true;
