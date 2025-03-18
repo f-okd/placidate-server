@@ -10,7 +10,9 @@ const INTERACTION_WEIGHTS = {
 export const getRecommendedPosts = async (req: Request, res: Response) => {
   try {
     const { userId } = req.params;
+    console.log(`Generating recommendations for user: ${userId}`);
 
+    console.log(`Preprocessing: Fetch and record block relationships`);
     // Get block relationships first
     const { data: blocks, error: blocksError } = await supabase
       .from('blocks')
@@ -28,10 +30,36 @@ export const getRecommendedPosts = async (req: Request, res: Response) => {
         .map((block) => block.blocker_id),
     ]);
 
+    console.log(`Preprocessing: Fetch mutual follow relationship`);
+    // Get users that the current user follows and users that follow the current user
+    // for mutual follower privacy check
+    const { data: following, error: followingError } = await supabase
+      .from('follows')
+      .select('following_id')
+      .eq('follower_id', userId);
+
+    if (followingError) throw followingError;
+
+    const { data: followers, error: followersError } = await supabase
+      .from('follows')
+      .select('follower_id')
+      .eq('following_id', userId);
+
+    if (followersError) throw followersError;
+
+    // Create sets for following and followers
+    const followingIds = new Set(following?.map((f) => f.following_id) || []);
+    const followerIds = new Set(followers?.map((f) => f.follower_id) || []);
+
+    // Find mutual followers (users who the current user follows and who follow the current user)
+    const mutualFollowerIds = new Set(
+      [...followingIds].filter((id) => followerIds.has(id))
+    );
+
     /************************************************************************************************/
     /**************************** 1. Get user's interaction history     ********************************/
     /************************************************************************************************/
-    console.log(1);
+    console.log('Step 1: Fetching interaction history');
     // Fetch posts that user has liked
     const { data: userLikes, error: likesError } = await supabase
       .from('likes')
@@ -62,15 +90,18 @@ export const getRecommendedPosts = async (req: Request, res: Response) => {
       (!userComments || userComments.length === 0) &&
       (!userBookmarks || userBookmarks.length === 0)
     ) {
-      return res.json(await getPopularPosts(userId, blockedUsers));
+      return res.json(
+        await getPopularPosts(userId, blockedUsers, mutualFollowerIds)
+      );
     }
 
     /************************************************************************************************/
     /**************************** 2. Build weighted interaction map     ******************************/
     /************************************************************************************************/
-    console.log(2);
+    console.log('Step 2: Weighting past interactions');
     const userInteractions = new Map(); // post_id -> weighted score that is used to weight significance/relevancy of the post
     const userInteractedPosts = new Set(); // Posts the user has interacted with
+    const previouslyRecommendedPosts: any[] = [];
 
     // Fetch and exclude previously recommended posts
     const { data: previouslyRecommended, error: prevRecError } = await supabase
@@ -83,7 +114,7 @@ export const getRecommendedPosts = async (req: Request, res: Response) => {
     // Add these to userInteractedPosts set to prevent re-recommendation
     if (previouslyRecommended) {
       previouslyRecommended.forEach((rec) => {
-        userInteractedPosts.add(rec.post_id);
+        previouslyRecommendedPosts.push(rec.post_id);
       });
     }
 
@@ -100,12 +131,12 @@ export const getRecommendedPosts = async (req: Request, res: Response) => {
         // Multiply weight with recency factor
         // Dynamic weights
         const recencyFactor = getRecencyFactor(like.created_at);
-        const weight = INTERACTION_WEIGHTS.like * recencyFactor;
+        const score = INTERACTION_WEIGHTS.like * recencyFactor;
 
         // Increment post's relevancy score (how significant is the interaction with this post)
         userInteractions.set(
           postId,
-          (userInteractions.get(postId) || 0) + weight
+          (userInteractions.get(postId) || 0) + score
         );
       });
     }
@@ -119,16 +150,15 @@ export const getRecommendedPosts = async (req: Request, res: Response) => {
         if (comment.posts && comment.posts.author_id === userId) return;
 
         const recencyFactor = getRecencyFactor(comment.created_at);
-        const weight = INTERACTION_WEIGHTS.comment * recencyFactor;
+        const score = INTERACTION_WEIGHTS.comment * recencyFactor;
 
         userInteractions.set(
           postId,
-          (userInteractions.get(postId) || 0) + weight
+          (userInteractions.get(postId) || 0) + score
         );
       });
     }
 
-    // Add bookmarks
     // Add bookmarks
     if (userBookmarks) {
       userBookmarks.forEach((bookmark) => {
@@ -138,11 +168,11 @@ export const getRecommendedPosts = async (req: Request, res: Response) => {
         if (bookmark.posts && bookmark.posts.author_id === userId) return;
 
         const recencyFactor = getRecencyFactor(bookmark.created_at);
-        const weight = INTERACTION_WEIGHTS.bookmark * recencyFactor;
+        const score = INTERACTION_WEIGHTS.bookmark * recencyFactor;
 
         userInteractions.set(
           postId,
-          (userInteractions.get(postId) || 0) + weight
+          (userInteractions.get(postId) || 0) + score
         );
       });
     }
@@ -150,7 +180,7 @@ export const getRecommendedPosts = async (req: Request, res: Response) => {
     /************************************************************************************************/
     /************** 3. Find similar users based on weighted interactions     *************************/
     /************************************************************************************************/
-    console.log(3);
+    console.log('Step 3: Determining similar users');
     // Convert the interacted posts to an array
     const interactedPostIds = Array.from(userInteractedPosts);
 
@@ -188,9 +218,8 @@ export const getRecommendedPosts = async (req: Request, res: Response) => {
     /************************************************************************************************/
     /********************* 4. Calculate user similarity scores     *************************************/
     /************************************************************************************************/
-    console.log(4);
+    console.log(`Step 4: Calculating user similarity scores`);
     const userSimilarityScores = new Map(); // user_id -> similarity score
-
     // Process likes
     if (similarUserInteractions) {
       similarUserInteractions.forEach((interaction) => {
@@ -207,7 +236,6 @@ export const getRecommendedPosts = async (req: Request, res: Response) => {
         );
       });
     }
-
     // Process comments
     if (similarUserComments) {
       similarUserComments.forEach((comment) => {
@@ -224,7 +252,6 @@ export const getRecommendedPosts = async (req: Request, res: Response) => {
         );
       });
     }
-
     // Process bookmarks
     if (similarUserBookmarks) {
       similarUserBookmarks.forEach((bookmark) => {
@@ -241,19 +268,36 @@ export const getRecommendedPosts = async (req: Request, res: Response) => {
         );
       });
     }
-
     /************************************************************************************************/
     /********** 5. Get not seen before posts that similar users have interacted with     **************/
     /************************************************************************************************/
     /****** Get top 20 most similar users, then find posts they have interacted (liked/commented/bookmarked) with *******/
+    console.log(
+      'Step 5: Fetching unseen posts that similar users have interacted with'
+    );
+
+    const postsToExclude = [
+      ...Array.from(userInteractedPosts),
+      ...previouslyRecommendedPosts,
+    ];
+    const excludePostIdsString = formatPostIdsForQuery(postsToExclude);
+
     const sortedSimilarUsers = Array.from(userSimilarityScores.entries())
       .sort((a, b) => b[1] - a[1]) // sort on score value not user id
       .slice(0, 20) // Top 20 similar users
       .map((entry) => entry[0]);
 
     if (sortedSimilarUsers.length === 0) {
-      return res.json(await getPopularPosts(userId, blockedUsers));
+      return res.json(
+        await getPopularPosts(userId, blockedUsers, mutualFollowerIds)
+      );
     }
+    console.log(`Generating recommendations for user: ${userId}`);
+    console.log(`Check post id is not in:`);
+    console.log([
+      ...Array.from(userInteractedPosts),
+      ...previouslyRecommendedPosts,
+    ]);
 
     // Get posts liked by similar users that current user hasn't interacted with
     const { data: recommendedLikes, error: recLikesError } = await supabase
@@ -264,7 +308,7 @@ export const getRecommendedPosts = async (req: Request, res: Response) => {
         user_id,
         posts!inner(
           *,
-          profiles!posts_author_id_fkey(id, username, avatar_url),
+          profiles!posts_author_id_fkey(id, username, avatar_url, is_private),
           post_tags(
             tag_id,
             tags(name)
@@ -273,7 +317,7 @@ export const getRecommendedPosts = async (req: Request, res: Response) => {
       `
       )
       .in('user_id', sortedSimilarUsers)
-      .not('post_id', 'in', Array.from(userInteractedPosts)) // prevent rerecommendation
+      .not('post_id', 'in', excludePostIdsString) // prevent rerecommendation
       .order('created_at', { ascending: false });
 
     if (recLikesError) throw recLikesError;
@@ -288,7 +332,7 @@ export const getRecommendedPosts = async (req: Request, res: Response) => {
         user_id,
         posts!inner(
           *,
-          profiles!posts_author_id_fkey(id, username, avatar_url),
+          profiles!posts_author_id_fkey(id, username, avatar_url, is_private),
           post_tags(
             tag_id,
             tags(name)
@@ -297,7 +341,7 @@ export const getRecommendedPosts = async (req: Request, res: Response) => {
       `
         )
         .in('user_id', sortedSimilarUsers)
-        .not('post_id', 'in', Array.from(userInteractedPosts)) // prevent rerecommendation
+        .not('post_id', 'in', excludePostIdsString)
         .order('created_at', { ascending: false });
 
     if (recCommentsError) throw recCommentsError;
@@ -312,7 +356,7 @@ export const getRecommendedPosts = async (req: Request, res: Response) => {
         user_id,
         posts!inner(
           *,
-          profiles!posts_author_id_fkey(id, username, avatar_url),
+          profiles!posts_author_id_fkey(id, username, avatar_url, is_private),
           post_tags(
             tag_id,
             tags(name)
@@ -321,7 +365,7 @@ export const getRecommendedPosts = async (req: Request, res: Response) => {
       `
         )
         .in('user_id', sortedSimilarUsers)
-        .not('post_id', 'in', Array.from(userInteractedPosts)) // prevent rerecommendation
+        .not('post_id', 'in', excludePostIdsString)
         .order('created_at', { ascending: false });
 
     if (recBookmarksError) throw recBookmarksError;
@@ -329,6 +373,7 @@ export const getRecommendedPosts = async (req: Request, res: Response) => {
     /************************************************************************************************/
     /********************* 6. Calculate final recommendation scores     *************************/
     /************************************************************************************************/
+    console.log('Step 6: Calculating final recommendation scores');
     const recommendationScores = new Map(); // post_id -> score
     const recommendedPosts = new Map(); // post_id -> post object
 
@@ -340,6 +385,14 @@ export const getRecommendedPosts = async (req: Request, res: Response) => {
           rec.posts.author_id === userId
         ) {
           return;
+        }
+
+        // Check privacy settings
+        if (
+          rec.posts.profiles?.is_private &&
+          !mutualFollowerIds.has(rec.posts.author_id)
+        ) {
+          return; // Skip posts from private profiles without mutual follow
         }
 
         const postId = rec.post_id;
@@ -364,6 +417,14 @@ export const getRecommendedPosts = async (req: Request, res: Response) => {
           return;
         }
 
+        // Check privacy settings
+        if (
+          rec.posts.profiles?.is_private &&
+          !mutualFollowerIds.has(rec.posts.author_id)
+        ) {
+          return; // Skip posts from private profiles without mutual follow
+        }
+
         const postId = rec.post_id;
         const userSimilarity = userSimilarityScores.get(rec.user_id) || 0;
         const score = userSimilarity * INTERACTION_WEIGHTS.comment;
@@ -386,6 +447,14 @@ export const getRecommendedPosts = async (req: Request, res: Response) => {
           return;
         }
 
+        // Check privacy settings
+        if (
+          rec.posts.profiles?.is_private &&
+          !mutualFollowerIds.has(rec.posts.author_id)
+        ) {
+          return; // Skip posts from private profiles without mutual follow
+        }
+
         const postId = rec.post_id;
         const userSimilarity = userSimilarityScores.get(rec.user_id) || 0;
         const score = userSimilarity * INTERACTION_WEIGHTS.bookmark;
@@ -397,8 +466,10 @@ export const getRecommendedPosts = async (req: Request, res: Response) => {
         recommendedPosts.set(postId, rec.posts);
       });
     }
-
-    // 7. Sort and return recommendations
+    /************************************************************************************************/
+    /********************* 7. Sort and return recommendations     *************************/
+    /************************************************************************************************/
+    console.log('Step 7: Sorting and returning final recommendations');
     const sortedRecommendations = Array.from(recommendationScores.entries())
       .sort((a, b) => b[1] - a[1])
       .slice(0, 20) // Top 20 recommendations
@@ -413,7 +484,11 @@ export const getRecommendedPosts = async (req: Request, res: Response) => {
       );
 
       // Get popular posts for backfilling
-      const popularResults = await getPopularPosts(userId, blockedUsers);
+      const popularResults = await getPopularPosts(
+        userId,
+        blockedUsers,
+        mutualFollowerIds
+      );
       const popularPosts = popularResults.recommendations;
 
       // Filter out any that are already in our recommendations
@@ -433,9 +508,7 @@ export const getRecommendedPosts = async (req: Request, res: Response) => {
         user_id: userId,
         post_id: post.id,
       }));
-      console.log(1);
       await supabase.from('post_recommendations').insert(recommendationInserts);
-      console.log(2);
 
       return res.json({
         recommendations: finalRecommendations,
@@ -446,6 +519,13 @@ export const getRecommendedPosts = async (req: Request, res: Response) => {
     }
 
     // If we had enough recommendations, return them as-is
+    // Insert the recommendation records
+    const recommendationInserts = sortedRecommendations.map((post) => ({
+      user_id: userId,
+      post_id: post.id,
+    }));
+    await supabase.from('post_recommendations').insert(recommendationInserts);
+
     return res.json({
       recommendations: sortedRecommendations,
       recommendationCount: sortedRecommendations.length,
@@ -470,15 +550,15 @@ function getRecencyFactor(timestamp) {
   return Math.exp(-0.023 * ageInDays); // ln(2)/30 ≈ 0.023
 }
 
-// Fallback: Get popular posts if user has no interaction history
-async function getPopularPosts(userId, blockedUsers) {
+// Updated getPopularPosts function to respect privacy settings
+async function getPopularPosts(userId, blockedUsers, mutualFollowerIds) {
   // Get posts with the most interactions (weighted)
   const { data: posts, error: postsError } = await supabase
     .from('posts')
     .select(
       `
       *,
-      profiles!posts_author_id_fkey(id, username, avatar_url),
+      profiles!posts_author_id_fkey(id, username, avatar_url, is_private),
       post_tags(tag_id, tags(name)),
       likes(count),
       comments(count),
@@ -490,10 +570,21 @@ async function getPopularPosts(userId, blockedUsers) {
 
   if (postsError) throw postsError;
 
-  // Filter out posts from blocked users
-  const filteredPosts = posts.filter(
-    (post) => !blockedUsers.has(post.author_id) && post.author_id !== userId
-  );
+  // Filter out posts from blocked users and respect privacy settings
+  const filteredPosts = posts.filter((post) => {
+    // Skip posts from blocked users
+    if (blockedUsers.has(post.author_id) || post.author_id === userId) {
+      return false;
+    }
+
+    // Check privacy settings
+    if (post.profiles?.is_private) {
+      return mutualFollowerIds.has(post.author_id);
+    }
+
+    // Public profiles' posts are visible to all
+    return true;
+  });
 
   // Calculate popularity score for each post
   const scoredPosts = filteredPosts.map((post) => {
@@ -524,3 +615,10 @@ async function getPopularPosts(userId, blockedUsers) {
     recommendationCount: recommendations.length,
   };
 }
+
+const formatPostIdsForQuery = (postIds: string[]) => {
+  if (!postIds || postIds.length === 0) {
+    return '()';
+  }
+  return `(${postIds.join(',')})`;
+};
