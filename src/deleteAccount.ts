@@ -2,15 +2,14 @@ import { Request, Response } from 'express';
 import { supabase } from '.';
 
 export const deleteAccount = async (req: Request, res: Response) => {
-  console.log('Delete endpoint hit');
-  const { userId } = req.params;
+  const user_id = req.body.user;
 
-  if (!userId) {
+  if (!user_id) {
     res.status(400).json({ error: 'Invalid user ID' });
     return;
   }
 
-  const success = await deleteAcc(userId);
+  const success = await deleteAcc(user_id);
 
   if (!success) {
     res.status(500).json({ error: 'Failed to delete account' });
