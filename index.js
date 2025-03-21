@@ -29,7 +29,7 @@ app.get('/api/health', (req, res) => {
 });
 
 app.delete('/api/users/:userId', authenticateToken, deleteAccount);
-app.get('/api/recommendations/:userId', getRecommendedPosts);
+app.get('/api/recommendations/:userId', authenticateToken, getRecommendedPosts);
 
 app.listen(port, () => {
   console.log(`Placidate listening on port ${port}`);
